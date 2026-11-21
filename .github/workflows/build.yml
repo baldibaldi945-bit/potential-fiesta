@@ -33,6 +33,48 @@ jobs:
           echo "Project: $DIR"
           ls -la "$DIR"
 
+      - name: Pre-extract game (no first-launch unpacking) and patch app
+        shell: bash
+        run: |
+          set -e
+          cd "$PROJECT_DIR/app/src/main/assets/www"
+          if [ -f game.sb3 ]; then
+            rm -rf /tmp/sb3 && mkdir -p /tmp/sb3 game/assets
+            unzip -q -o game.sb3 -d /tmp/sb3
+            mv /tmp/sb3/project.json game/project.json
+            find /tmp/sb3 -type f -exec mv {} game/assets/ \;
+            rm -f game.sb3
+          fi
+          echo "project.json: $(du -h game/project.json | cut -f1), assets: $(ls game/assets | wc -l) files, $(du -sh game/assets | cut -f1)"
+          cd "$PROJECT_DIR"
+          python3 - <<'PYEOF'
+          import os
+          root = os.environ["PROJECT_DIR"]
+          def patch(path, pairs):
+              p = os.path.join(root, path)
+              s = open(p, encoding="utf8").read()
+              for a, b in pairs:
+                  if a in s:
+                      s = s.replace(a, b)
+                      print("patched", path, ":", a[:40])
+                  else:
+                      print("SKIP (not found)", path, ":", a[:40])
+              open(p, "w", encoding="utf8").write(s)
+
+          patch("app/src/main/java/com/axelzerox23/sprunki/MainActivity.java", [
+            ("if (isReady()) { startWeb(); return; }", "startWeb(); if (true) return;"),
+            (".addPathHandler(\"/data/\", new WebViewAssetLoader.InternalStoragePathHandler(this, gameDir))", ""),
+          ])
+          patch("app/src/main/assets/www/index.html", [
+            ("/data/assets/", "/assets/www/game/assets/"),
+            ("/data/project.json", "/assets/www/game/project.json"),
+            ("const LITE=true;", "var __t0=Date.now();var __iv=setInterval(function(){var l=document.getElementById('loading');if(!l||l.style.display==='none'){clearInterval(__iv);return;}if(l.textContent.indexOf('\u062c\u0627\u0631\u064a')===0){l.textContent='\u062c\u0627\u0631\u064a \u0627\u0644\u062a\u062d\u0645\u064a\u0644\u2026 / Loading\u2026 '+Math.floor((Date.now()-__t0)/1000)+'s';}},500);\n  const LITE=true;"),
+          ])
+          patch("app/build.gradle", [
+            ("noCompress 'sb3'", "noCompress 'sb3', 'ogg', 'png'"),
+          ])
+          PYEOF
+
       - uses: actions/setup-node@v4
         with:
           node-version: 22
