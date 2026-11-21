@@ -61,18 +61,93 @@ jobs:
                       print("SKIP (not found)", path, ":", a[:40])
               open(p, "w", encoding="utf8").write(s)
 
+          JAVA_FIELD = "private File gameDir;\n    private final java.util.concurrent.atomic.AtomicInteger fileCount = new java.util.concurrent.atomic.AtomicInteger();"
+          JAVA_INTERCEPT = ("WebResourceResponse resp = loader.shouldInterceptRequest(r.getUrl());\n"
+              "                String pth = r.getUrl().getPath();\n"
+              "                if (pth != null && pth.startsWith(\"/assets/www/game/assets/\")) {\n"
+              "                    final int n = fileCount.incrementAndGet();\n"
+              "                    if (n % 5 == 0) ui.post(() -> { if (web != null) web.evaluateJavascript(\"window.__p&&window.__p(\" + n + \")\", null); });\n"
+              "                }\n"
+              "                return resp;")
+
           patch("app/src/main/java/com/axelzerox23/sprunki/MainActivity.java", [
             ("if (isReady()) { startWeb(); return; }", "startWeb(); if (true) return;"),
             (".addPathHandler(\"/data/\", new WebViewAssetLoader.InternalStoragePathHandler(this, gameDir))", ""),
+            ("private File gameDir;", JAVA_FIELD),
+            ("return loader.shouldInterceptRequest(r.getUrl());", JAVA_INTERCEPT),
           ])
           patch("app/src/main/assets/www/index.html", [
             ("/data/assets/", "/assets/www/game/assets/"),
             ("/data/project.json", "/assets/www/game/project.json"),
-            ("const LITE=true;", "var __t0=Date.now();var __iv=setInterval(function(){var l=document.getElementById('loading');if(!l||l.style.display==='none'){clearInterval(__iv);return;}if(l.textContent.indexOf('\u062c\u0627\u0631\u064a')===0){l.textContent='\u062c\u0627\u0631\u064a \u0627\u0644\u062a\u062d\u0645\u064a\u0644\u2026 / Loading\u2026 '+Math.floor((Date.now()-__t0)/1000)+'s';}},500);\n  const LITE=true;"),
+            ("const LITE=true;", "var __t0=Date.now(),__n=0,__total=0;window.__p=function(n){__n=n;};var __iv=setInterval(function(){var l=document.getElementById('loading');if(!l||l.style.display==='none'){clearInterval(__iv);return;}if(/error/i.test(l.textContent))return;var s=Math.floor((Date.now()-__t0)/1000);var p=__total>0?Math.min(100,Math.floor(__n*100/__total)):0;if(p<100){l.innerHTML='<div>\u062c\u0627\u0631\u064a \u0627\u0644\u062a\u062d\u0645\u064a\u0644\u2026 '+p+'%</div><div>Loading\u2026 '+p+'%</div>';}else{l.innerHTML='<div>\u062a\u062c\u0647\u064a\u0632 \u0627\u0644\u0623\u0635\u0648\u0627\u062a \u0648\u0627\u0644\u0631\u0633\u0648\u0645\u0627\u062a\u2026 '+s+'s</div><div>Preparing audio and graphics\u2026 '+s+'s</div>';}},400);\n  const LITE=true;"),
+            ("await scaffolding.loadProject(txt);", "try{var __pj=JSON.parse(txt),__ids={};(__pj.targets||[]).forEach(function(t){(t.costumes||[]).concat(t.sounds||[]).forEach(function(a){__ids[a.assetId]=1;});});__total=Object.keys(__ids).length;}catch(e){}\n    await scaffolding.loadProject(txt);"),
           ])
           patch("app/build.gradle", [
             ("noCompress 'sb3'", "noCompress 'sb3', 'ogg', 'png'"),
           ])
+          PYEOF
+
+      - name: Lighten sounds and images
+        shell: bash
+        run: |
+          set -e
+          A="$PROJECT_DIR/app/src/main/assets/www/game/assets"
+          WWW="$PROJECT_DIR/app/src/main/assets/www"
+          command -v ffmpeg >/dev/null 2>&1 || { sudo apt-get update -qq && sudo apt-get install -y -qq ffmpeg; }
+          python3 -c "import PIL" 2>/dev/null || pip install --quiet --break-system-packages pillow || sudo apt-get install -y -qq python3-pil
+          echo "== sounds: 16kHz mono =="
+          BEFORE=$(cat "$A"/*.ogg | wc -c)
+          mkdir -p /tmp/snd
+          for f in "$A"/*.ogg; do
+            b="$(basename "$f")"
+            if ffmpeg -v error -y -i "$f" -vn -ac 1 -ar 16000 -c:a libvorbis -q:a 0 "/tmp/snd/$b" </dev/null; then
+              mv "/tmp/snd/$b" "$f"
+            else
+              echo "kept original: $b"
+            fi
+          done
+          AFTER=$(cat "$A"/*.ogg | wc -c)
+          echo "sounds bytes: $BEFORE -> $AFTER"
+          sed -i 's/sampleRate:22050/sampleRate:16000/' "$WWW/index.html"
+          echo "== images inside SVGs: max 640px =="
+          python3 - "$A" <<'PYEOF' || echo "svg optimize skipped"
+          import re, glob, os, io, base64, sys
+          from PIL import Image
+          import xml.etree.ElementTree as ET
+          MAXW = 640
+          pat = re.compile(r'(href=")data:image/(png|jpe?g|webp);base64,([^"]+)(")')
+          def shrink(m):
+              fmt, data = m.group(2), m.group(3)
+              try:
+                  im = Image.open(io.BytesIO(base64.b64decode(data)))
+                  if im.width <= MAXW and im.height <= MAXW:
+                      return m.group(0)
+                  s = MAXW / max(im.width, im.height)
+                  im = im.convert('RGBA')
+                  im = im.resize((max(1, round(im.width * s)), max(1, round(im.height * s))), Image.LANCZOS)
+                  out = io.BytesIO()
+                  im.save(out, 'WEBP', quality=80, method=4); mime = 'webp'
+                  return m.group(1) + 'data:image/' + mime + ';base64,' + base64.b64encode(out.getvalue()).decode() + m.group(4)
+              except Exception as e:
+                  print('skip image', e); return m.group(0)
+          def run(folder):
+              before = after = changed = 0
+              for f in glob.glob(os.path.join(folder, '*.svg')):
+                  t = open(f, encoding='utf8').read()
+                  b = len(t.encode('utf8'))
+                  n = pat.sub(shrink, t)
+                  n = re.sub(r'<!--.*?-->', '', n, flags=re.S)
+                  n = re.sub(r'>\s+<', '><', n)
+                  if n != t:
+                      try:
+                          ET.fromstring(n)
+                      except Exception as e:
+                          print('XML broke, keeping original:', os.path.basename(f), e); n = t
+                  if n != t:
+                      open(f, 'w', encoding='utf8').write(n); changed += 1
+                  before += b; after += len(n.encode('utf8'))
+              print('svg files changed', changed, 'MB before', round(before/1e6,2), 'after', round(after/1e6,2))
+          run(sys.argv[1])
           PYEOF
 
       - uses: actions/setup-node@v4
