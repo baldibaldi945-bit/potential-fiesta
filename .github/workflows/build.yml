@@ -11,7 +11,7 @@ permissions:
 jobs:
   build:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
+    timeout-minutes: 40
     steps:
       - uses: actions/checkout@v4
 
@@ -35,42 +35,25 @@ jobs:
 
       - uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
 
-      - name: Fetch Scratch runtime (offline copy goes inside the APK)
+      - name: Build Scratch runtime from TurboWarp packager (goes inside the APK)
         shell: bash
         run: |
-          cd "$PROJECT_DIR"
           DEST="$PROJECT_DIR/app/src/main/assets/www/scaffolding-full.js"
-          npm install --no-audit --no-fund || true
-          SRC="$(find node_modules/@turbowarp/scaffolding -name 'scaffolding-full.js' 2>/dev/null | head -n 1 || true)"
-          if [ -n "$SRC" ]; then
-            cp "$SRC" "$DEST"
-            echo "Found in latest version: $SRC"
-          else
-            echo "Latest version has no scaffolding-full.js (source only). Trying older versions..."
-            mkdir -p /tmp/scf && cd /tmp/scf
-            VERS="$(npm view @turbowarp/scaffolding versions --json | node -e 'const v=JSON.parse(require("fs").readFileSync(0,"utf8"));console.log((Array.isArray(v)?v:[v]).reverse().slice(0,40).join("\n"))')"
-            for v in $VERS; do
-              echo "trying $v"
-              rm -rf pkg && mkdir pkg
-              if npm pack "@turbowarp/scaffolding@$v" --silent > name.txt 2>/dev/null; then
-                T="$(tail -n 1 name.txt)"
-                F="$(tar -tzf "$T" | grep 'scaffolding-full.js$' | head -n 1 || true)"
-                if [ -n "$F" ]; then
-                  tar -xzf "$T" -C pkg "$F"
-                  cp "pkg/$F" "$DEST"
-                  echo "FOUND in version $v: $F"
-                  break
-                fi
-              fi
-            done
-          fi
-          if [ ! -f "$DEST" ]; then
-            echo "::error::scaffolding-full.js not found in any npm version"
-            ls node_modules/@turbowarp/scaffolding || true
+          git clone --depth 1 https://github.com/TurboWarp/packager.git /tmp/packager
+          cd /tmp/packager
+          export NODE_OPTIONS=--max-old-space-size=6144
+          npm ci --no-audit --no-fund || npm install --no-audit --no-fund
+          npm run build-prod || npm run build
+          SRC="$(find dist -name 'scaffolding-full.js' | head -n 1 || true)"
+          if [ -z "$SRC" ]; then
+            echo "::error::scaffolding-full.js was not produced"
+            find dist -maxdepth 3 | head -n 40
             exit 1
           fi
+          cp "$SRC" "$DEST"
+          echo "Built: $SRC"
           ls -lh "$DEST"
 
       - uses: actions/setup-java@v5
