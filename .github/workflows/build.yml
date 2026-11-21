@@ -1,0 +1,96 @@
+name: Build APK
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Find project (unzips the uploaded zip if needed)
+        shell: bash
+        run: |
+          set -e
+          S="$(find . -maxdepth 5 -name 'settings.gradle' -not -path './.git/*' | head -n 1)"
+          if [ -z "$S" ]; then
+            ZIP="$(find . -maxdepth 2 -iname '*.zip' -not -path './.git/*' | head -n 1)"
+            if [ -z "$ZIP" ]; then echo "::error::no project and no zip in the repo"; exit 1; fi
+            mkdir -p /tmp/proj
+            unzip -q -o "$ZIP" -d /tmp/proj
+            S="$(find /tmp/proj -maxdepth 5 -name 'settings.gradle' | head -n 1)"
+          fi
+          if [ -z "$S" ]; then echo "::error::settings.gradle not found"; exit 1; fi
+          DIR="$(cd "$(dirname "$S")" && pwd)"
+          echo "PROJECT_DIR=$DIR" >> "$GITHUB_ENV"
+          echo "Project: $DIR"
+          ls -la "$DIR"
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Fetch Scratch runtime (offline copy goes inside the APK)
+        shell: bash
+        run: |
+          cd "$PROJECT_DIR"
+          npm install
+          bash scripts/copy-runtime.sh
+          ls -lh app/src/main/assets/www
+
+      - uses: actions/setup-java@v5
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: Prepare Android SDK (preinstalled on runner)
+        shell: bash
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "sdk.dir=$SDK" > "$PROJECT_DIR/local.properties"
+          SM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SM" --licenses > /dev/null 2>&1 || true
+          "$SM" "platforms;android-34" "build-tools;34.0.0" > /dev/null 2>&1 || true
+
+      - uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+          cache-disabled: true
+
+      - name: Build APK
+        shell: bash
+        run: |
+          set -o pipefail
+          cd "$PROJECT_DIR"
+          gradle assembleRelease --no-daemon --console=plain 2>&1 | tee /tmp/build.log
+
+      - name: Show errors
+        if: failure()
+        shell: bash
+        run: |
+          [ -f /tmp/build.log ] || exit 0
+          grep -nE 'error:|What went wrong|Execution failed|Caused by:|Could not|not found|FAILED' -A2 /tmp/build.log | head -n 80 > /tmp/errs.txt || true
+          { echo '### Errors'; echo '```'; cat /tmp/errs.txt; echo '```'; } >> "$GITHUB_STEP_SUMMARY"
+          echo "=========== ERRORS ==========="
+          cat /tmp/errs.txt
+
+      - name: Collect APK
+        shell: bash
+        run: |
+          mkdir -p "$GITHUB_WORKSPACE/apk-out"
+          find "$PROJECT_DIR/app/build/outputs/apk" -name '*.apk' -exec cp {} "$GITHUB_WORKSPACE/apk-out/" \;
+          ls -lh "$GITHUB_WORKSPACE/apk-out"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Sprunki-Retake-Human-apk
+          path: apk-out/*.apk
+          if-no-files-found: error
